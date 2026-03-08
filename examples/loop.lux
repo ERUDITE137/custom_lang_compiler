@@ -1,0 +1,16 @@
+# Sum 0..9 using a for-range loop, then classify the result
+let n = 10
+let sum = 0
+
+for i in range(n) {
+    sum = sum + i
+}
+
+print("Sum of 0 to 9:")
+print(sum)
+
+if sum > 40 {
+    print("That's a big sum!")
+} else {
+    print("That's a small sum.")
+}

@@ -1,0 +1,7 @@
+# Hello World in Lux
+let name = "World"
+print("Hello, " + name + "!")
+
+let x = 6
+let y = 7
+print(x * y)

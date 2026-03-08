@@ -1,0 +1,30 @@
+# Boolean and conditional expressions
+let a = true
+let b = false
+
+if a && !b {
+    print("a is true and b is false")
+}
+
+let x = 15
+let y = 20
+
+if x < y {
+    print("x is less than y")
+}
+
+if x >= 10 && y <= 25 {
+    print("both conditions hold")
+}
+
+# Nested if/else
+let score = 85
+if score >= 90 {
+    print("Grade: A")
+} else {
+    if score >= 75 {
+        print("Grade: B")
+    } else {
+        print("Grade: C")
+    }
+}
