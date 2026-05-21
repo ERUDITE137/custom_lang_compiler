@@ -96,8 +96,16 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 		return p.parseIfStmt()
 	case lexer.FOR:
 		return p.parseForRangeStmt()
+	case lexer.WHILE:
+		return p.parseWhileStmt()
 	case lexer.PRINT:
 		return p.parsePrintStmt()
+	case lexer.ATOMIC:
+		return p.parseAtomicStmt()
+	case lexer.RETRY:
+		return p.parseRetryStmt()
+	case lexer.JOIN:
+		return p.parseJoinStmt()
 	case lexer.IDENT:
 		// Could be assignment: name = expr
 		if p.peekAhead(1).Type == lexer.ASSIGN {
@@ -219,6 +227,58 @@ func (p *Parser) parsePrintStmt() (*ast.PrintStmt, error) {
 	return &ast.PrintStmt{Line: line, Value: val}, nil
 }
 
+func (p *Parser) parseWhileStmt() (*ast.WhileStmt, error) {
+	line := p.peek().Line
+	p.advance() // consume 'while'
+	cond, err := p.parseExpr(0)
+	if err != nil {
+		return nil, err
+	}
+	body, err := p.parseBlock()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.WhileStmt{Line: line, Condition: cond, Body: body}, nil
+}
+
+func (p *Parser) parseAtomicStmt() (*ast.AtomicStmt, error) {
+	line := p.peek().Line
+	p.advance() // consume 'atomic'
+	body, err := p.parseBlock()
+	if err != nil {
+		return nil, err
+	}
+	return &ast.AtomicStmt{Line: line, Body: body}, nil
+}
+
+func (p *Parser) parseRetryStmt() (*ast.RetryStmt, error) {
+	line := p.peek().Line
+	p.advance() // consume 'retry'
+	if err := p.expectNewlineOrEOF(); err != nil {
+		return nil, err
+	}
+	return &ast.RetryStmt{Line: line}, nil
+}
+
+func (p *Parser) parseJoinStmt() (*ast.JoinStmt, error) {
+	line := p.peek().Line
+	p.advance() // consume 'join'
+	if _, err := p.expect(lexer.LPAREN); err != nil {
+		return nil, err
+	}
+	val, err := p.parseExpr(0)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.RPAREN); err != nil {
+		return nil, err
+	}
+	if err := p.expectNewlineOrEOF(); err != nil {
+		return nil, err
+	}
+	return &ast.JoinStmt{Line: line, Value: val}, nil
+}
+
 func (p *Parser) parseExprStmt() (*ast.ExprStmt, error) {
 	t := p.peek()
 	expr, err := p.parseExpr(0)
@@ -335,6 +395,14 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 	case lexer.IDENT:
 		p.advance()
 		return &ast.IdentExpr{Line: t.Line, Name: t.Literal}, nil
+
+	case lexer.SPAWN:
+		p.advance()
+		body, err := p.parseBlock()
+		if err != nil {
+			return nil, err
+		}
+		return &ast.SpawnExpr{Line: t.Line, Body: body}, nil
 
 	case lexer.BANG, lexer.MINUS:
 		p.advance()

@@ -1,0 +1,89 @@
+# ============================================================
+# Demo 1: Bank transfer — atomic blocks prevent partial state
+# ============================================================
+
+print("=== Demo 1: Atomic Bank Transfer ===")
+
+let balance_a = 100
+let balance_b = 100
+
+# Transfer $30 from A to B
+let t1 = spawn {
+    atomic {
+        balance_a = balance_a - 30
+        balance_b = balance_b + 30
+    }
+}
+
+# Transfer $50 from B to A
+let t2 = spawn {
+    atomic {
+        balance_b = balance_b - 50
+        balance_a = balance_a + 50
+    }
+}
+
+join(t1)
+join(t2)
+
+print(balance_a)
+print(balance_b)
+print(balance_a + balance_b)
+
+# ============================================================
+# Demo 2: Conflict detection — two threads increment counter
+# ============================================================
+
+print("=== Demo 2: Concurrent Counter (conflict + retry) ===")
+
+let counter = 0
+
+let t3 = spawn {
+    for i in range(5) {
+        atomic {
+            counter = counter + 1
+        }
+    }
+}
+
+let t4 = spawn {
+    for i in range(5) {
+        atomic {
+            counter = counter + 1
+        }
+    }
+}
+
+join(t3)
+join(t4)
+
+print(counter)
+
+# ============================================================
+# Demo 3: retry — thread 2 waits for thread 1 to finish
+# ============================================================
+
+print("=== Demo 3: Ordering with retry ===")
+
+let done = false
+
+let t5 = spawn {
+    atomic {
+        print("Thread 1: critical section")
+        done = true
+    }
+}
+
+let t6 = spawn {
+    atomic {
+        if done == false {
+            retry
+        }
+        print("Thread 2: critical section (guaranteed after thread 1)")
+    }
+}
+
+join(t5)
+join(t6)
+
+print("Both threads finished")

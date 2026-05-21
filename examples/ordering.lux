@@ -1,0 +1,52 @@
+# Multi-thread ordering using STM retry
+# Guarantees: Thread 1 → Thread 2 → Thread 3 → Thread 4 → Thread 5
+
+let turn = 0
+
+let t1 = spawn {
+    atomic {
+        if turn != 0 { retry }
+        print("Thread 1: executing")
+        turn = 1
+    }
+}
+
+let t2 = spawn {
+    atomic {
+        if turn != 1 { retry }
+        print("Thread 2: executing")
+        turn = 2
+    }
+}
+
+let t3 = spawn {
+    atomic {
+        if turn != 2 { retry }
+        print("Thread 3: executing")
+        turn = 3
+    }
+}
+
+let t4 = spawn {
+    atomic {
+        if turn != 3 { retry }
+        print("Thread 4: executing")
+        turn = 4
+    }
+}
+
+let t5 = spawn {
+    atomic {
+        if turn != 4 { retry }
+        print("Thread 5: executing")
+        turn = 5
+    }
+}
+
+join(t1)
+join(t2)
+join(t3)
+join(t4)
+join(t5)
+
+print("All 5 threads finished in order")

@@ -1,0 +1,32 @@
+# Demo: I/O buffering in STM
+#
+# print() inside atomic is buffered — if the transaction retries
+# due to a conflict, the output is discarded (no phantom prints).
+# Only the successful commit's output appears.
+
+let x = 0
+
+let t1 = spawn {
+    for i in range(5) {
+        atomic {
+            x = x + 1
+            print("t1 incremented x")
+        }
+    }
+}
+
+let t2 = spawn {
+    for i in range(5) {
+        atomic {
+            x = x + 1
+            print("t2 incremented x")
+        }
+    }
+}
+
+join(t1)
+join(t2)
+
+# There should be exactly 10 print lines above — one per
+# successful commit. Retried transactions produce no output.
+print(x)

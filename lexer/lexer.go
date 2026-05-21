@@ -19,14 +19,19 @@ const (
 	FALSE  TokenType = "FALSE"
 
 	// Identifiers & keywords
-	IDENT  TokenType = "IDENT"
-	LET    TokenType = "LET"
-	IF     TokenType = "IF"
-	ELSE   TokenType = "ELSE"
-	FOR    TokenType = "FOR"
-	IN     TokenType = "IN"
-	RANGE  TokenType = "RANGE"
-	PRINT  TokenType = "PRINT"
+	IDENT     TokenType = "IDENT"
+	LET       TokenType = "LET"
+	IF        TokenType = "IF"
+	ELSE      TokenType = "ELSE"
+	FOR       TokenType = "FOR"
+	IN        TokenType = "IN"
+	RANGE     TokenType = "RANGE"
+	PRINT     TokenType = "PRINT"
+	WHILE  TokenType = "WHILE"
+	SPAWN  TokenType = "SPAWN"
+	JOIN   TokenType = "JOIN"
+	ATOMIC TokenType = "ATOMIC"
+	RETRY  TokenType = "RETRY"
 
 	// Operators
 	PLUS     TokenType = "+"
@@ -59,15 +64,20 @@ const (
 )
 
 var keywords = map[string]TokenType{
-	"let":   LET,
-	"if":    IF,
-	"else":  ELSE,
-	"for":   FOR,
-	"in":    IN,
-	"range": RANGE,
-	"print": PRINT,
-	"true":  TRUE,
-	"false": FALSE,
+	"let":       LET,
+	"if":        IF,
+	"else":      ELSE,
+	"for":       FOR,
+	"in":        IN,
+	"range":     RANGE,
+	"print":     PRINT,
+	"true":      TRUE,
+	"false":     FALSE,
+	"while":  WHILE,
+	"spawn":  SPAWN,
+	"join":   JOIN,
+	"atomic": ATOMIC,
+	"retry":  RETRY,
 }
 
 // Token is a single lexical unit.

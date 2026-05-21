@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"lux/ast"
 	"math"
+	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 )
 
 // RuntimeError carries an error with a source line number.
@@ -17,15 +20,149 @@ func (e *RuntimeError) Error() string {
 	return fmt.Sprintf("runtime error (line %d): %s", e.Line, e.Message)
 }
 
+// ─── STM runtime types ──────────────────────────────────────────────────────
+
+// sentinel for deleted variables inside a transaction
+type tombstone struct{}
+
+// TxnLog holds the read-set, write-set, and buffered I/O for one transaction.
+type TxnLog struct {
+	readSet  map[string]interface{}
+	writeSet map[string]interface{}
+	ioBuf    strings.Builder // buffered print output; flushed only on commit
+}
+
+// errRetry is a sentinel error used by the retry statement.
+var errRetry = fmt.Errorf("STM retry")
+
+// LuxThread is a handle to a spawned goroutine.
+type LuxThread struct {
+	done chan struct{}
+	err  error
+}
+
 // Interpreter walks the AST and executes it.
 type Interpreter struct {
-	env    map[string]interface{}
-	output strings.Builder // collects print output; flushed to stdout via caller
+	env        map[string]interface{}
+	mu         sync.Mutex   // protects env; also used as commitCond's locker
+	commitCond *sync.Cond   // broadcast on every successful STM commit
+	txns       sync.Map     // goroutineID → *TxnLog (active transactions)
+	output     strings.Builder
 }
 
 // New creates a fresh interpreter.
 func New() *Interpreter {
-	return &Interpreter{env: make(map[string]interface{})}
+	interp := &Interpreter{env: make(map[string]interface{})}
+	interp.commitCond = sync.NewCond(&interp.mu)
+	return interp
+}
+
+// ─── goroutine ID helper ────────────────────────────────────────────────────
+
+func goroutineID() uint64 {
+	var buf [64]byte
+	n := runtime.Stack(buf[:], false)
+	// format: "goroutine 123 [...]"
+	s := string(buf[:n])
+	s = s[len("goroutine "):]
+	idx := 0
+	for idx < len(s) && s[idx] >= '0' && s[idx] <= '9' {
+		idx++
+	}
+	id, _ := strconv.ParseUint(s[:idx], 10, 64)
+	return id
+}
+
+// activeTxn returns the current goroutine's transaction log, or nil.
+func (interp *Interpreter) activeTxn() *TxnLog {
+	if v, ok := interp.txns.Load(goroutineID()); ok {
+		return v.(*TxnLog)
+	}
+	return nil
+}
+
+// ─── thread-safe env accessors (transaction-aware) ──────────────────────────
+
+func (interp *Interpreter) getVar(name string) (interface{}, bool) {
+	if txn := interp.activeTxn(); txn != nil {
+		// Check write-set first (our own pending writes)
+		if v, ok := txn.writeSet[name]; ok {
+			if _, dead := v.(tombstone); dead {
+				return nil, false
+			}
+			return v, true
+		}
+		// Check read-set (already read in this txn)
+		if v, ok := txn.readSet[name]; ok {
+			return v, true
+		}
+		// Read from shared env and record in read-set
+		interp.mu.Lock()
+		v, ok := interp.env[name]
+		interp.mu.Unlock()
+		if ok {
+			txn.readSet[name] = v
+		}
+		return v, ok
+	}
+	interp.mu.Lock()
+	defer interp.mu.Unlock()
+	v, ok := interp.env[name]
+	return v, ok
+}
+
+func (interp *Interpreter) setVar(name string, val interface{}) {
+	if txn := interp.activeTxn(); txn != nil {
+		txn.writeSet[name] = val
+		return
+	}
+	interp.mu.Lock()
+	defer interp.mu.Unlock()
+	interp.env[name] = val
+}
+
+func (interp *Interpreter) deleteVar(name string) {
+	if txn := interp.activeTxn(); txn != nil {
+		txn.writeSet[name] = tombstone{}
+		return
+	}
+	interp.mu.Lock()
+	defer interp.mu.Unlock()
+	delete(interp.env, name)
+}
+
+// ─── STM commit logic ───────────────────────────────────────────────────────
+
+// validateTxn checks that every value in the read-set still matches shared env.
+// Caller must hold interp.mu.
+func (interp *Interpreter) validateTxn(txn *TxnLog) bool {
+	for name, expected := range txn.readSet {
+		actual, ok := interp.env[name]
+		if !ok || actual != expected {
+			return false
+		}
+	}
+	return true
+}
+
+// commitTxn attempts to validate and commit a transaction.
+// Returns true on success, false on conflict.
+func (interp *Interpreter) commitTxn(txn *TxnLog) bool {
+	interp.mu.Lock()
+	defer interp.mu.Unlock()
+	if !interp.validateTxn(txn) {
+		return false
+	}
+	for name, val := range txn.writeSet {
+		if _, dead := val.(tombstone); dead {
+			delete(interp.env, name)
+		} else {
+			interp.env[name] = val
+		}
+	}
+	// Wake up any transactions blocked on retry
+	interp.commitCond.Broadcast()
+	return true
 }
 
 // Run executes a program and returns any runtime error.
@@ -55,8 +192,16 @@ func (interp *Interpreter) execStmt(stmt ast.Statement) error {
 		return interp.execIf(s)
 	case *ast.ForRangeStmt:
 		return interp.execForRange(s)
+	case *ast.WhileStmt:
+		return interp.execWhile(s)
 	case *ast.PrintStmt:
 		return interp.execPrint(s)
+	case *ast.AtomicStmt:
+		return interp.execAtomic(s)
+	case *ast.RetryStmt:
+		return interp.execRetry(s)
+	case *ast.JoinStmt:
+		return interp.execJoin(s)
 	case *ast.ExprStmt:
 		_, err := interp.evalExpr(s.Expression)
 		return err
@@ -70,19 +215,19 @@ func (interp *Interpreter) execLet(s *ast.LetStmt) error {
 	if err != nil {
 		return err
 	}
-	interp.env[s.Name] = val
+	interp.setVar(s.Name, val)
 	return nil
 }
 
 func (interp *Interpreter) execAssign(s *ast.AssignStmt) error {
-	if _, ok := interp.env[s.Name]; !ok {
+	if _, ok := interp.getVar(s.Name); !ok {
 		return &RuntimeError{Line: s.Line, Message: fmt.Sprintf("undefined variable %q", s.Name)}
 	}
 	val, err := interp.evalExpr(s.Value)
 	if err != nil {
 		return err
 	}
-	interp.env[s.Name] = val
+	interp.setVar(s.Name, val)
 	return nil
 }
 
@@ -110,18 +255,37 @@ func (interp *Interpreter) execForRange(s *ast.ForRangeStmt) error {
 	if err != nil {
 		return err
 	}
-	// Save any pre-existing binding for the loop variable.
-	old, hadOld := interp.env[s.Var]
+	old, hadOld := interp.getVar(s.Var)
 	for i := int64(0); i < limit; i++ {
-		interp.env[s.Var] = i
+		interp.setVar(s.Var, i)
 		if err := interp.execBlock(s.Body); err != nil {
 			return err
 		}
 	}
 	if hadOld {
-		interp.env[s.Var] = old
+		interp.setVar(s.Var, old)
 	} else {
-		delete(interp.env, s.Var)
+		interp.deleteVar(s.Var)
+	}
+	return nil
+}
+
+func (interp *Interpreter) execWhile(s *ast.WhileStmt) error {
+	for {
+		cond, err := interp.evalExpr(s.Condition)
+		if err != nil {
+			return err
+		}
+		b, err := toBool(cond, s.Line)
+		if err != nil {
+			return err
+		}
+		if !b {
+			break
+		}
+		if err := interp.execBlock(s.Body); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -131,7 +295,14 @@ func (interp *Interpreter) execPrint(s *ast.PrintStmt) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(valueToString(val))
+	str := valueToString(val)
+	// Inside a transaction, buffer output — only flush on commit
+	if txn := interp.activeTxn(); txn != nil {
+		txn.ioBuf.WriteString(str)
+		txn.ioBuf.WriteByte('\n')
+		return nil
+	}
+	fmt.Println(str)
 	return nil
 }
 
@@ -140,6 +311,78 @@ func (interp *Interpreter) execBlock(stmts []ast.Statement) error {
 		if err := interp.execStmt(stmt); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// ─── STM: atomic and retry ──────────────────────────────────────────────────
+
+func (interp *Interpreter) execAtomic(s *ast.AtomicStmt) error {
+	gid := goroutineID()
+	attempt := 0
+	for {
+		attempt++
+		txn := &TxnLog{
+			readSet:  make(map[string]interface{}),
+			writeSet: make(map[string]interface{}),
+		}
+		interp.txns.Store(gid, txn)
+
+		err := interp.execBlock(s.Body)
+
+		interp.txns.Delete(gid)
+
+		if err == errRetry {
+			// Check if read-set already changed before blocking
+			interp.mu.Lock()
+			if interp.validateTxn(txn) {
+				// Variables haven't changed yet — wait for a commit
+				fmt.Printf("[STM] retry: waiting for variables to change (attempt %d)\n", attempt)
+				interp.commitCond.Wait()
+			}
+			interp.mu.Unlock()
+			continue
+		}
+		if err != nil {
+			return err
+		}
+
+		if interp.commitTxn(txn) {
+			// Flush buffered I/O only on successful commit
+			if txn.ioBuf.Len() > 0 {
+				fmt.Print(txn.ioBuf.String())
+			}
+			if attempt > 1 {
+				fmt.Printf("[STM] transaction committed after %d attempts\n", attempt)
+			}
+			return nil
+		}
+		// Validation failed — conflict detected, retry
+		fmt.Printf("[STM] conflict detected, retrying... (attempt %d)\n", attempt)
+	}
+}
+
+func (interp *Interpreter) execRetry(s *ast.RetryStmt) error {
+	if interp.activeTxn() == nil {
+		return &RuntimeError{Line: s.Line, Message: "retry can only be used inside an atomic block"}
+	}
+	return errRetry
+}
+
+// ─── concurrency: spawn and join ────────────────────────────────────────────
+
+func (interp *Interpreter) execJoin(s *ast.JoinStmt) error {
+	val, err := interp.evalExpr(s.Value)
+	if err != nil {
+		return err
+	}
+	thread, ok := val.(*LuxThread)
+	if !ok {
+		return &RuntimeError{Line: s.Line, Message: fmt.Sprintf("join() expects a thread, got %T", val)}
+	}
+	<-thread.done
+	if thread.err != nil {
+		return thread.err
 	}
 	return nil
 }
@@ -163,13 +406,15 @@ func (interp *Interpreter) evalExpr(expr ast.Expression) (interface{}, error) {
 		return interp.evalUnary(e)
 	case *ast.BinaryExpr:
 		return interp.evalBinary(e)
+	case *ast.SpawnExpr:
+		return interp.evalSpawn(e)
 	default:
 		return nil, fmt.Errorf("unknown expression type %T", expr)
 	}
 }
 
 func (interp *Interpreter) evalIdent(e *ast.IdentExpr) (interface{}, error) {
-	val, ok := interp.env[e.Name]
+	val, ok := interp.getVar(e.Name)
 	if !ok {
 		return nil, &RuntimeError{Line: e.Line, Message: fmt.Sprintf("undefined variable %q", e.Name)}
 	}
@@ -313,6 +558,18 @@ func (interp *Interpreter) evalBinary(e *ast.BinaryExpr) (interface{}, error) {
 	return nil, &RuntimeError{Line: e.Line, Message: fmt.Sprintf("unknown operator %q", e.Op)}
 }
 
+func (interp *Interpreter) evalSpawn(e *ast.SpawnExpr) (interface{}, error) {
+	thread := &LuxThread{done: make(chan struct{})}
+	body := e.Body
+	go func() {
+		defer close(thread.done)
+		if err := interp.execBlock(body); err != nil {
+			thread.err = err
+		}
+	}()
+	return thread, nil
+}
+
 // ─── type helpers ─────────────────────────────────────────────────────────────
 
 func toBool(val interface{}, line int) (bool, error) {
@@ -339,8 +596,6 @@ func toInt(val interface{}, line int) (int64, error) {
 	return 0, &RuntimeError{Line: line, Message: fmt.Sprintf("expected integer, got %T", val)}
 }
 
-// toNumbers coerces both values to float64 for comparison/arithmetic.
-// Returns isFloat=true if either operand was a float64.
 func toNumbers(left, right interface{}, line int) (lf, rf float64, isFloat bool, err error) {
 	toF := func(v interface{}) (float64, bool, error) {
 		switch n := v.(type) {
@@ -375,6 +630,8 @@ func valueToString(val interface{}) string {
 		return fmt.Sprintf("%d", v)
 	case float64:
 		return fmt.Sprintf("%g", v)
+	case *LuxThread:
+		return "<thread>"
 	case nil:
 		return "nil"
 	}

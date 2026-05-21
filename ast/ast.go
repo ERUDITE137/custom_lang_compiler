@@ -99,6 +99,46 @@ func (s *ExprStmt) node()          {}
 func (s *ExprStmt) stmtNode()      {}
 func (s *ExprStmt) String() string { return s.Expression.String() }
 
+// WhileStmt: while <cond> { <body> }
+type WhileStmt struct {
+	Line      int
+	Condition Expression
+	Body      []Statement
+}
+
+func (s *WhileStmt) node()          {}
+func (s *WhileStmt) stmtNode()      {}
+func (s *WhileStmt) String() string { return fmt.Sprintf("while %s { ... }", s.Condition) }
+
+// AtomicStmt: atomic { <body> }
+type AtomicStmt struct {
+	Line int
+	Body []Statement
+}
+
+func (s *AtomicStmt) node()          {}
+func (s *AtomicStmt) stmtNode()      {}
+func (s *AtomicStmt) String() string { return "atomic { ... }" }
+
+// RetryStmt: retry (only valid inside atomic)
+type RetryStmt struct {
+	Line int
+}
+
+func (s *RetryStmt) node()          {}
+func (s *RetryStmt) stmtNode()      {}
+func (s *RetryStmt) String() string { return "retry" }
+
+// JoinStmt: join(<expr>)
+type JoinStmt struct {
+	Line  int
+	Value Expression
+}
+
+func (s *JoinStmt) node()          {}
+func (s *JoinStmt) stmtNode()      {}
+func (s *JoinStmt) String() string { return fmt.Sprintf("join(%s)", s.Value) }
+
 // ─── Expressions ────────────────────────────────────────────────────────────
 
 // NumberLit holds an integer or float literal.
@@ -172,3 +212,14 @@ type UnaryExpr struct {
 func (e *UnaryExpr) node()          {}
 func (e *UnaryExpr) exprNode()      {}
 func (e *UnaryExpr) String() string { return fmt.Sprintf("(%s%s)", e.Op, e.Operand) }
+
+// SpawnExpr: spawn { body }
+type SpawnExpr struct {
+	Line int
+	Body []Statement
+}
+
+func (e *SpawnExpr) node()          {}
+func (e *SpawnExpr) exprNode()      {}
+func (e *SpawnExpr) String() string { return "spawn { ... }" }
+
